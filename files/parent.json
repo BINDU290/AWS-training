@@ -1,0 +1,159 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "PARENT STACK - Orchestrates deployment of all child stacks in order: 1-Network, 2-Compute, 3-ALB, 4-Data. Upload all child JSON templates to S3 before deploying this stack.",
+
+  "Parameters": {
+    "EnvironmentName": {
+      "Type": "String",
+      "Default": "nginx-app",
+      "Description": "Prefix shared across all stacks and exports"
+    },
+    "TemplatesBucketName": {
+      "Type": "String",
+      "Description": "S3 bucket where the 4 child JSON templates are stored"
+    },
+    "TemplatesPrefix": {
+      "Type": "String",
+      "Default": "nested-cft",
+      "Description": "S3 key prefix (folder) for child templates"
+    },
+    "VpcCIDR": {
+      "Type": "String",
+      "Default": "10.0.0.0/16"
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Default": "t3.micro",
+      "AllowedValues": ["t3.micro", "t3.small", "t3.medium", "t3.large"]
+    },
+    "MinSize": {
+      "Type": "Number",
+      "Default": 1
+    },
+    "MaxSize": {
+      "Type": "Number",
+      "Default": 4
+    },
+    "DesiredCapacity": {
+      "Type": "Number",
+      "Default": 2
+    },
+    "StaticSiteBucketName": {
+      "Type": "String",
+      "Description": "Globally unique name for the static website S3 bucket (lowercase, hyphens only)"
+    },
+    "EnableVersioning": {
+      "Type": "String",
+      "Default": "Enabled",
+      "AllowedValues": ["Enabled", "Suspended"]
+    }
+  },
+
+  "Resources": {
+
+    "NetworkStack": {
+      "Type": "AWS::CloudFormation::Stack",
+      "Properties": {
+        "TemplateURL": {
+          "Fn::Sub": "https://s3.amazonaws.com/${TemplatesBucketName}/${TemplatesPrefix}/network.json"
+        },
+        "TimeoutInMinutes": 20,
+        "Parameters": {
+          "EnvironmentName": { "Ref": "EnvironmentName" },
+          "VpcCIDR": { "Ref": "VpcCIDR" }
+        },
+        "Tags": [
+          { "Key": "StackLayer", "Value": "network" },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentName" } }
+        ]
+      }
+    },
+
+    "ComputeStack": {
+      "Type": "AWS::CloudFormation::Stack",
+      "DependsOn": "NetworkStack",
+      "Properties": {
+        "TemplateURL": {
+          "Fn::Sub": "https://s3.amazonaws.com/${TemplatesBucketName}/${TemplatesPrefix}/compute.json"
+        },
+        "TimeoutInMinutes": 20,
+        "Parameters": {
+          "EnvironmentName": { "Ref": "EnvironmentName" },
+          "InstanceType": { "Ref": "InstanceType" },
+          "MinSize": { "Ref": "MinSize" },
+          "MaxSize": { "Ref": "MaxSize" },
+          "DesiredCapacity": { "Ref": "DesiredCapacity" }
+        },
+        "Tags": [
+          { "Key": "StackLayer", "Value": "compute" },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentName" } }
+        ]
+      }
+    },
+
+    "ALBStack": {
+      "Type": "AWS::CloudFormation::Stack",
+      "DependsOn": ["NetworkStack", "ComputeStack"],
+      "Properties": {
+        "TemplateURL": {
+          "Fn::Sub": "https://s3.amazonaws.com/${TemplatesBucketName}/${TemplatesPrefix}/alb.json"
+        },
+        "TimeoutInMinutes": 15,
+        "Parameters": {
+          "EnvironmentName": { "Ref": "EnvironmentName" }
+        },
+        "Tags": [
+          { "Key": "StackLayer", "Value": "alb" },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentName" } }
+        ]
+      }
+    },
+
+    "DataStack": {
+      "Type": "AWS::CloudFormation::Stack",
+      "Properties": {
+        "TemplateURL": {
+          "Fn::Sub": "https://s3.amazonaws.com/${TemplatesBucketName}/${TemplatesPrefix}/data.json"
+        },
+        "TimeoutInMinutes": 10,
+        "Parameters": {
+          "EnvironmentName": { "Ref": "EnvironmentName" },
+          "BucketName": { "Ref": "StaticSiteBucketName" },
+          "EnableVersioning": { "Ref": "EnableVersioning" }
+        },
+        "Tags": [
+          { "Key": "StackLayer", "Value": "data" },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentName" } }
+        ]
+      }
+    }
+  },
+
+  "Outputs": {
+    "AppURL": {
+      "Description": "Your Nginx application URL",
+      "Value": {
+        "Fn::Sub": [
+          "http://${DNS}",
+          { "DNS": { "Fn::GetAtt": ["ALBStack", "Outputs.ALBDNSName"] } }
+        ]
+      }
+    },
+    "StaticWebsiteURL": {
+      "Description": "S3 static website URL",
+      "Value": { "Fn::GetAtt": ["DataStack", "Outputs.WebsiteURL"] }
+    },
+    "VpcId": {
+      "Description": "VPC ID",
+      "Value": { "Fn::GetAtt": ["NetworkStack", "Outputs.VpcId"] }
+    },
+    "ASGName": {
+      "Description": "Auto Scaling Group name",
+      "Value": { "Fn::GetAtt": ["ComputeStack", "Outputs.AutoScalingGroupName"] }
+    },
+    "TargetGroupArn": {
+      "Description": "Target Group ARN - run the attach command after deploy",
+      "Value": { "Fn::GetAtt": ["ALBStack", "Outputs.TargetGroupArn"] }
+    }
+  }
+}
