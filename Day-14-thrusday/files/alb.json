@@ -1,0 +1,118 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "ALB Stack - Application Load Balancer in public subnets, Target Group with health checks, HTTP listener.",
+
+  "Parameters": {
+    "EnvironmentName": {
+      "Type": "String",
+      "Default": "nginx-app"
+    },
+    "HealthCheckPath": {
+      "Type": "String",
+      "Default": "/"
+    },
+    "HealthCheckIntervalSeconds": {
+      "Type": "Number",
+      "Default": 30
+    },
+    "HealthyThresholdCount": {
+      "Type": "Number",
+      "Default": 2
+    },
+    "UnhealthyThresholdCount": {
+      "Type": "Number",
+      "Default": 3
+    }
+  },
+
+  "Resources": {
+
+    "ApplicationLoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Name": { "Fn::Sub": "${EnvironmentName}-alb" },
+        "Scheme": "internet-facing",
+        "Type": "application",
+        "IpAddressType": "ipv4",
+        "Subnets": [
+          { "Fn::ImportValue": { "Fn::Sub": "${EnvironmentName}-PublicSubnet1Id" } },
+          { "Fn::ImportValue": { "Fn::Sub": "${EnvironmentName}-PublicSubnet2Id" } }
+        ],
+        "SecurityGroups": [
+          { "Fn::ImportValue": { "Fn::Sub": "${EnvironmentName}-ALBSecurityGroupId" } }
+        ],
+        "LoadBalancerAttributes": [
+          { "Key": "idle_timeout.timeout_seconds", "Value": "60" },
+          { "Key": "routing.http2.enabled", "Value": "true" },
+          { "Key": "routing.http.drop_invalid_header_fields.enabled", "Value": "true" },
+          { "Key": "access_logs.s3.enabled", "Value": "false" }
+        ],
+        "Tags": [{ "Key": "Name", "Value": { "Fn::Sub": "${EnvironmentName}-alb" } }]
+      }
+    },
+
+    "NginxTargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "Name": { "Fn::Sub": "${EnvironmentName}-tg" },
+        "VpcId": { "Fn::ImportValue": { "Fn::Sub": "${EnvironmentName}-VpcId" } },
+        "Protocol": "HTTP",
+        "Port": 80,
+        "TargetType": "instance",
+        "HealthCheckEnabled": true,
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckPort": "traffic-port",
+        "HealthCheckPath": { "Ref": "HealthCheckPath" },
+        "HealthCheckIntervalSeconds": { "Ref": "HealthCheckIntervalSeconds" },
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": { "Ref": "HealthyThresholdCount" },
+        "UnhealthyThresholdCount": { "Ref": "UnhealthyThresholdCount" },
+        "Matcher": { "HttpCode": "200" },
+        "TargetGroupAttributes": [
+          { "Key": "deregistration_delay.timeout_seconds", "Value": "30" },
+          { "Key": "load_balancing.algorithm.type", "Value": "least_outstanding_requests" },
+          { "Key": "stickiness.enabled", "Value": "false" }
+        ],
+        "Tags": [{ "Key": "Name", "Value": { "Fn::Sub": "${EnvironmentName}-tg" } }]
+      }
+    },
+
+    "HTTPListener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": { "Ref": "ApplicationLoadBalancer" },
+        "Protocol": "HTTP",
+        "Port": 80,
+        "DefaultActions": [
+          {
+            "Type": "forward",
+            "TargetGroupArn": { "Ref": "NginxTargetGroup" }
+          }
+        ]
+      }
+    }
+  },
+
+  "Outputs": {
+    "ALBArn": {
+      "Description": "Application Load Balancer ARN",
+      "Value": { "Ref": "ApplicationLoadBalancer" },
+      "Export": { "Name": { "Fn::Sub": "${EnvironmentName}-ALBArn" } }
+    },
+    "ALBDNSName": {
+      "Description": "Public DNS name of the ALB",
+      "Value": { "Fn::GetAtt": ["ApplicationLoadBalancer", "DNSName"] },
+      "Export": { "Name": { "Fn::Sub": "${EnvironmentName}-ALBDNSName" } }
+    },
+    "ALBHostedZoneId": {
+      "Description": "ALB Hosted Zone ID for Route 53 alias records",
+      "Value": { "Fn::GetAtt": ["ApplicationLoadBalancer", "CanonicalHostedZoneID"] },
+      "Export": { "Name": { "Fn::Sub": "${EnvironmentName}-ALBHostedZoneId" } }
+    },
+    "TargetGroupArn": {
+      "Description": "Target Group ARN - attach this to the ASG after deploy",
+      "Value": { "Ref": "NginxTargetGroup" },
+      "Export": { "Name": { "Fn::Sub": "${EnvironmentName}-TargetGroupArn" } }
+    }
+  }
+}

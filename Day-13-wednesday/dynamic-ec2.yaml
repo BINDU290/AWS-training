@@ -1,0 +1,428 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Task-2: Dynamic EC2 provisioning using Conditions, Mappings, and Metadata.
+  Creates Linux and/or Windows instances with web servers and user/password login
+  configured automatically via User Data.
+
+# =============================================================
+# METADATA - Groups parameters cleanly in the CloudFormation
+#            console UI (no effect on deployment logic)
+# =============================================================
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Instance Selection"
+        Parameters:
+          - InstanceOS
+          - Environment
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - VpcId
+          - SubnetId
+          - SSHLocation
+      - Label:
+          default: "Login Credentials (stored securely)"
+        Parameters:
+          - KeyPairName
+          - WebServerUsername
+          - WebServerPassword
+    ParameterLabels:
+      InstanceOS:
+        default: "Which OS to deploy?"
+      Environment:
+        default: "Environment (controls instance size via Mappings)"
+      VpcId:
+        default: "Target VPC"
+      SubnetId:
+        default: "Target Subnet (must be public)"
+      SSHLocation:
+        default: "Your IP for SSH/RDP access (x.x.x.x/32)"
+      KeyPairName:
+        default: "EC2 Key Pair (for emergency access)"
+      WebServerUsername:
+        default: "Web server OS username to create"
+      WebServerPassword:
+        default: "Password for that username (NoEcho)"
+
+# =============================================================
+# PARAMETERS
+# =============================================================
+Parameters:
+
+  InstanceOS:
+    Type: String
+    Default: Linux
+    AllowedValues:
+      - Linux
+      - Windows
+      - Both
+    Description: Choose which OS instances to create
+
+  Environment:
+    Type: String
+    Default: Dev
+    AllowedValues:
+      - Dev
+      - Staging
+      - Prod
+    Description: Environment tier - controls instance size via Mappings
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where instances will be launched
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet for the instances
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Key pair for emergency SSH/RDP access
+
+  SSHLocation:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    Description: IP range allowed for SSH (Linux) and RDP (Windows)
+    ConstraintDescription: Must be a valid CIDR range x.x.x.x/x
+
+  WebServerUsername:
+    Type: String
+    Default: webadmin
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    Description: OS-level username to create on the web server
+
+  WebServerPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: '[a-zA-Z0-9!@#$%^&*()_+=-]*'
+    Description: Password for the web server username (NoEcho - hidden in logs)
+
+# =============================================================
+# MAPPINGS
+# =============================================================
+Mappings:
+
+  # AMI IDs per region and OS
+  # Update these if deploying in regions other than us-east-1
+  RegionAndOSToAMI:
+    us-east-1:
+      Linux:   ami-0c02fb55956c7d316   # Amazon Linux 2
+      Windows: ami-05856bd26dd466893   # Windows Server 2022 Base
+    us-east-2:
+      Linux:   ami-0568936c8d2b91c50
+      Windows: ami-05f44f38d8b2e48d1
+    us-west-2:
+      Linux:   ami-0c65adc9a5c1b5d7c
+      Windows: ami-0a9ad7a4ae50e8e77
+    ap-south-1:
+      Linux:   ami-0f5ee92e2d63afc18
+      Windows: ami-007a33c4b0efdeeff
+    eu-west-1:
+      Linux:   ami-0d71ea30463e0ff49
+      Windows: ami-0b9a214196fa8f29e
+
+  # Instance size per environment
+  EnvironmentToInstanceType:
+    Dev:
+      Linux:   t3.micro
+      Windows: t3.micro
+    Staging:
+      Linux:   t3.small
+      Windows: t3.micro
+    Prod:
+      Linux:   t3.micro
+      Windows: t3.micro
+
+# =============================================================
+# CONDITIONS
+# =============================================================
+Conditions:
+
+  # True when user wants Linux or Both
+  CreateLinuxInstance: !Or
+    - !Equals [!Ref InstanceOS, Linux]
+    - !Equals [!Ref InstanceOS, Both]
+
+  # True when user wants Windows or Both
+  CreateWindowsInstance: !Or
+    - !Equals [!Ref InstanceOS, Windows]
+    - !Equals [!Ref InstanceOS, Both]
+
+  # Convenience condition - true only when Both selected
+  CreateBothInstances: !Equals [!Ref InstanceOS, Both]
+
+# =============================================================
+# RESOURCES
+# =============================================================
+Resources:
+
+  # -----------------------------------------------------------
+  # SECURITY GROUP - Linux (SSH + HTTP)
+  # Created only when Linux or Both is selected
+  # -----------------------------------------------------------
+  LinuxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateLinuxInstance
+    Properties:
+      GroupDescription: Linux web server - SSH and HTTP access
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+          Description: SSH access
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP web traffic
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS web traffic
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Linux-SG'
+
+  # -----------------------------------------------------------
+  # SECURITY GROUP - Windows (RDP + HTTP)
+  # Created only when Windows or Both is selected
+  # -----------------------------------------------------------
+  WindowsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateWindowsInstance
+    Properties:
+      GroupDescription: Windows web server - RDP and HTTP access
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref SSHLocation
+          Description: RDP access
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP web traffic
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS web traffic
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Windows-SG'
+
+  # -----------------------------------------------------------
+  # LINUX EC2 INSTANCE
+  # Condition: CreateLinuxInstance
+  # - Installs Apache via User Data
+  # - Creates OS user with password login
+  # - Enables password authentication in SSH
+  # -----------------------------------------------------------
+  LinuxWebServer:
+    Type: AWS::EC2::Instance
+    Condition: CreateLinuxInstance
+    Properties:
+      ImageId: !FindInMap [RegionAndOSToAMI, !Ref AWS::Region, Linux]
+      InstanceType: !FindInMap [EnvironmentToInstanceType, !Ref Environment, Linux]
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref LinuxSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Linux-WebServer-${Environment}'
+        - Key: OS
+          Value: Linux
+        - Key: Environment
+          Value: !Ref Environment
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+
+          # --- System update ---
+          yum update -y
+
+          # --- Install Apache web server ---
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+
+          # --- Deploy web page ---
+          cat > /var/www/html/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head><title>3-Tier App - Linux Web Server</title></head>
+          <body style="font-family:Arial;text-align:center;padding:50px;background:#f0f0f0">
+            <h1>Linux Web Server</h1>
+            <p><b>Stack:</b> ${AWS::StackName}</p>
+            <p><b>Environment:</b> ${Environment}</p>
+            <p><b>Region:</b> ${AWS::Region}</p>
+            <p><b>Instance Type:</b> via Mappings - ${Environment}/Linux</p>
+          </body>
+          </html>
+          EOF
+
+          # --- Create OS user with password login ---
+          useradd -m -s /bin/bash ${WebServerUsername}
+          echo "${WebServerUsername}:${WebServerPassword}" | chpasswd
+
+          # --- Enable password authentication in SSH ---
+          sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          systemctl restart sshd
+
+          # --- Signal success ---
+          echo "Linux web server setup complete" >> /var/log/user-data.log
+
+  # -----------------------------------------------------------
+  # WINDOWS EC2 INSTANCE
+  # Condition: CreateWindowsInstance
+  # - Installs IIS via PowerShell User Data
+  # - Creates local Windows user with password
+  # - Deploys default IIS webpage
+  # -----------------------------------------------------------
+  WindowsWebServer:
+    Type: AWS::EC2::Instance
+    Condition: CreateWindowsInstance
+    Properties:
+      ImageId: !FindInMap [RegionAndOSToAMI, !Ref AWS::Region, Windows]
+      InstanceType: !FindInMap [EnvironmentToInstanceType, !Ref Environment, Windows]
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref WindowsSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Windows-WebServer-${Environment}'
+        - Key: OS
+          Value: Windows
+        - Key: Environment
+          Value: !Ref Environment
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          # --- Install IIS web server ---
+          Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+
+          # --- Deploy default web page ---
+          $html = @"
+          <!DOCTYPE html>
+          <html>
+          <head><title>3-Tier App - Windows Web Server</title></head>
+          <body style='font-family:Arial;text-align:center;padding:50px;background:#e8f0fe'>
+            <h1>Windows Web Server</h1>
+            <p><b>Stack:</b> ${AWS::StackName}</p>
+            <p><b>Environment:</b> ${Environment}</p>
+            <p><b>Region:</b> ${AWS::Region}</p>
+            <p><b>Instance Type:</b> via Mappings - ${Environment}/Windows</p>
+          </body>
+          </html>
+          "@
+          $html | Out-File -FilePath "C:\inetpub\wwwroot\index.html" -Encoding utf8
+
+          # --- Create local Windows user with password ---
+          $password = ConvertTo-SecureString "${WebServerPassword}" -AsPlainText -Force
+          New-LocalUser -Name "${WebServerUsername}" `
+                        -Password $password `
+                        -FullName "Web Server Admin" `
+                        -Description "Created by CloudFormation UserData"
+
+          # --- Add user to Administrators and Remote Desktop Users groups ---
+          Add-LocalGroupMember -Group "Administrators" -Member "${WebServerUsername}"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "${WebServerUsername}"
+
+          # --- Enable RDP ---
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                           -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          Write-Output "Windows web server setup complete" | Out-File C:\user-data.log
+          </powershell>
+          <persist>true</persist>
+
+# =============================================================
+# OUTPUTS
+# Conditional outputs - only shown when resource was created
+# =============================================================
+Outputs:
+
+  LinuxPublicIP:
+    Condition: CreateLinuxInstance
+    Description: Linux web server public IP
+    Value: !GetAtt LinuxWebServer.PublicIp
+
+  LinuxPublicDNS:
+    Condition: CreateLinuxInstance
+    Description: Linux web server public DNS
+    Value: !GetAtt LinuxWebServer.PublicDnsName
+
+  LinuxWebURL:
+    Condition: CreateLinuxInstance
+    Description: Linux web server URL
+    Value: !Sub 'http://${LinuxWebServer.PublicIp}'
+
+  LinuxSSHCommand:
+    Condition: CreateLinuxInstance
+    Description: SSH with key pair (emergency access)
+    Value: !Sub 'ssh -i ${KeyPairName}.pem ec2-user@${LinuxWebServer.PublicIp}'
+
+  LinuxPasswordSSH:
+    Condition: CreateLinuxInstance
+    Description: SSH with username/password
+    Value: !Sub 'ssh ${WebServerUsername}@${LinuxWebServer.PublicIp}'
+
+  LinuxInstanceType:
+    Condition: CreateLinuxInstance
+    Description: Instance type selected via Mappings
+    Value: !FindInMap [EnvironmentToInstanceType, !Ref Environment, Linux]
+
+  WindowsPublicIP:
+    Condition: CreateWindowsInstance
+    Description: Windows web server public IP
+    Value: !GetAtt WindowsWebServer.PublicIp
+
+  WindowsPublicDNS:
+    Condition: CreateWindowsInstance
+    Description: Windows web server public DNS
+    Value: !GetAtt WindowsWebServer.PublicDnsName
+
+  WindowsWebURL:
+    Condition: CreateWindowsInstance
+    Description: Windows web server URL
+    Value: !Sub 'http://${WindowsWebServer.PublicIp}'
+
+  WindowsRDPCommand:
+    Condition: CreateWindowsInstance
+    Description: RDP connection - use username and password set above
+    Value: !Sub 'mstsc /v:${WindowsWebServer.PublicIp}'
+
+  WindowsInstanceType:
+    Condition: CreateWindowsInstance
+    Description: Instance type selected via Mappings
+    Value: !FindInMap [EnvironmentToInstanceType, !Ref Environment, Windows]
+
+  SelectedOS:
+    Description: OS selection made for this stack
+    Value: !Ref InstanceOS
+
+  SelectedEnvironment:
+    Description: Environment tier for this stack
+    Value: !Ref Environment
