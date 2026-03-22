@@ -97,3 +97,4 @@ def lambda_handler(event, context):
 Watch cloudwatch through logs
 
 ![alt text](<Screenshot (178).png>)
+
